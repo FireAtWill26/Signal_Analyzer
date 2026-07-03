@@ -1,0 +1,34 @@
+{
+    "data_root": "/dfs/dataset/230-1724661625521/data/dataprod",
+    "signal_root": "/dfs/data/tools/analyzer/example_signal",
+    "output_dir": "/dfs/data/tools/analyzer/output",
+    "universe_list": [
+        {"key": "whole", "name": "Whole Universe", "path": "__universe/uid.N128C", "type": "uid"},
+        {"key": "A500", "name": "A500", "path": "A500/A500.N,5860c", "type": "membership"},
+        {"key": "ZZ100", "name": "ZZ100", "path": "ZZ100/ZZ100_.N,5860c", "type": "membership"},
+        {"key": "ZZ500", "name": "ZZ500", "path": "ZZ500/ZZ500.N,5860c", "type": "membership"},
+        {"key": "ZZ800", "name": "ZZ800", "path": "ZZ800/ZZ800.N,5860c", "type": "membership"},
+        {"key": "ZZ1000", "name": "ZZ1000", "path": "ZZ1000/ZZ1000_.N,5860c", "type": "membership"},
+        {"key": "ZZ1500", "name": "ZZ1500", "path": "ZZ1500/ZZ1500.N,5860c", "type": "membership"},
+        {"key": "ZZ1800", "name": "ZZ1800", "path": "ZZ1800/ZZ1800.N,5860c", "type": "membership"},
+        {"key": "ZZ2000", "name": "ZZ2000", "path": "ZZ2000/ZZ2000.N,5860c", "type": "membership"},
+        {"key": "ZZ3000", "name": "ZZ3000", "path": "ZZ3000Index/ZZ3000_.N,5860c", "type": "membership"},
+        {"key": "HS300", "name": "HS300", "path": "HS300/HS300.N,5860c", "type": "membership"},
+        {"key": "SSE", "name": "上证", "path": "BlockN/block4n.N,5860I", "type": "block", "block_id": 0},
+        {"key": "SZSE", "name": "深证", "path": "BlockN/block4n.N,5860I", "type": "block", "block_id": 1},
+        {"key": "ChiNext", "name": "创业板", "path": "BlockN/block4n.N,5860I", "type": "block", "block_id": 2},
+        {"key": "STAR", "name": "科创板", "path": "BlockN/block4n.N,5860I", "type": "block", "block_id": 3},
+        {"key": "Residual", "name": "Residual", "type": "complement", "base": "whole", "subtract": ["HS300", "ZZ500", "ZZ1000", "ZZ2000"]}
+    ],
+    "price_files": {
+        "raw": "ForwardAdjPrices/ForwardAdjPrices.S_DQ_CLOSE.N,5860f",
+        "forward": "ForwardAdjPrices/ForwardAdjPrices.S_DQ_ADJCLOSE.N,5860f",
+        "backward": "ForwardAdjPrices/ForwardAdjPrices.S_DQ_ADJCLOSE_BACKWARD.N,5860f"
+    },
+    "interval_close": "IntervalFull/IntervalFull.close.N49,5860f",
+    "adj_factor": "CAX/adjfactor.N,5860f",
+    "zz3000_weight": "ZZ3000Index/ZZ3000.weight.N,5860f",
+    "dsrt_return": "CNE5Ret/CNE5Ret.DSRT.d1.N49,5664f",
+    "intv_variants": ["i00", "i06", "i12", "i24", "i30", "i36"],
+    "default_alpha_field": "alphaV1"
+}
