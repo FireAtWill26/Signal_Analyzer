@@ -62,10 +62,12 @@ python /dfs/data/tools/analyzer/generate_report.py \
      - 仓位 = 调整后的信号值（货币单位）
      - 日 PnL = `sum(position_i * return_i)`，日收益率 = `PnL / target_gross`
      - 参数：目标总仓位 (gross exposure)
-   - `Top-N 等权多头 (top_n)`
-     - 在 universe 成员中按信号值选 top-N，等权持有
-     - 日收益率 = top-N 股票次日收益的均值
-     - 参数：Top-N
+   - `Power (power)`
+     - 对信号 rank（1=最小，N=最大），降低异常值影响
+     - 对 rank demean + scale，使 `sum(|positions|) = target_gross`
+     - 仓位 = 调整后的 rank 值（货币单位）
+     - 参数：目标总仓位 (gross exposure)
+     - **注意**：使用 Power 方法时，建议同时开启 `limit_filter_pos=True`，以确保 ranking 只在可交易的股票上进行
 
 3. **主区域查看结果**：
    - 收益分析：累计收益曲线 + 月度收益柱状图 + 月度收益表
@@ -94,7 +96,7 @@ python /dfs/data/tools/analyzer/generate_report.py \
 
 **位置**：在 "📊 多 universe 月度收益对比" 表格之后。
 
-**含义**：对每个月，显示各 sub-universe（A500、HS300、ZZ500、ZZ1000、ZZ2000、ChiNext、STAR）在当月因子在 whole universe 上的总收益中所占的百分比。
+**含义**：对每个月，显示各 sub-universe（A500、HS300、ZZ500、ZZ1000、ZZ2000、SH、SZ、ChiNext、STAR、Residual）在当月因子在 whole universe 上的总收益中所占的百分比。
 
 **计算方式**：
 
@@ -110,6 +112,36 @@ python /dfs/data/tools/analyzer/generate_report.py \
 **注意**：
 - 当总收益为 0 或接近 0 时，占比显示为 0%
 - 占比可能为负值（当某 sub-universe 月度 PnL 与总收益符号相反时）
+- 各 sub-universe 之间可能存在重叠（如 A500 与 HS300、ZZ500），因此各列占比之和可能大于 100%。`Residual` = `whole - HS300 - ZZ500 - ZZ1000 - ZZ2000` 是与 HS300/ZZ500/ZZ1000/ZZ2000 互斥的剩余股票
+
+### 每月贡献前 5 的股票表（新增）
+
+**位置**：在 "📊 每月持仓占比" 表格之后。
+
+**含义**：对每个月，显示当月对因子在 whole universe 上的总收益贡献前 5 的股票，并列出每只股票所属的所有 sub-universe。
+
+**计算方式**：
+
+1. **每日 PnL 拆解**：对每个交易日，先按 whole universe 计算仓位（`signal_weighted` 或 `power`），再计算每只股票当日的 PnL 贡献：
+   - `stock_pnl_i = position_i * return_i`
+
+2. **按月累计**：将每只股票的每日 PnL 贡献按月累计，得到该股票当月的总 PnL 贡献。
+
+3. **排序取前 5**：对每个月，按 PnL 贡献降序排序，取前 5 只股票。
+
+4. **查询 sub-universe**：对每只股票，检查它在当月所属的所有 sub-universe（A500、HS300、ZZ500、ZZ1000、ZZ2000、SH、SZ、ChiNext、STAR、Residual）。即对该股票，检查当月内是否曾在该 sub-universe 中。
+
+**输出列**：
+- `month_label`：月份标签
+- `rank`：当月贡献排名（1-5）
+- `stock_code`：股票代码（如 `002336.SZ`）
+- `pnl_contribution`：当月该股票的 PnL 贡献（货币单位）
+- `sub_universes`：该股票所属的所有 sub-universe（逗号分隔）
+
+**注意**：
+- PnL 贡献可为负值（当该股票当月产生亏损时）
+- 同一只股票可能在多个月份出现（如果它在多个月份都是 top-5 贡献者）
+- sub-universe 列显示该股票所属的所有 sub-universe，可能包含多个（如 `ZZ2000, SZ, Residual`）
 
 ## 编程接口
 
@@ -136,8 +168,8 @@ by_intv = scan_signal_files(cfg['signal_root'])  # {intv_tag: [(date, path), ...
 ```python
 from analyzer import (
     compute_portfolio_returns,       # 统一调度器
-    compute_top_n_portfolio_returns, # Top-N 等权多头
     compute_signal_weighted_returns, # 信号加权 (demean + scale)
+    compute_power_returns,           # Power (rank → demean → scale)
     compute_cumulative_returns,
     compute_monthly_returns,
     compute_signal_statistics,
@@ -147,10 +179,10 @@ from analyzer import (
 # 统一调度器（默认 signal_weighted）
 daily_ret = compute_portfolio_returns(
     signal_files, universe_key, data_root,
-    position_method='signal_weighted',  # or 'top_n'
-    target_gross=20e6,                  # for signal_weighted
-    top_n=50,                           # for top_n
-    adjust='forward',
+    position_method='signal_weighted',  # or 'power'
+    target_gross=20e6,                  # for signal_weighted / power
+    exclude_limit=False,                # 是否剔除涨跌停股
+    limit_filter_pos=False,             # 是否在分配仓位前剔除涨跌停股
 )
 
 # 累计收益
@@ -270,24 +302,52 @@ __universe/dates.NI    # dtype <i4, shape (1511,)
 - `sum(positions) ≈ 0` ✓（多头空头相抵）
 - `sum(|positions|) = target_gross` ✓（绝对值总和等于目标）
 
-### 2. Top-N 等权多头 (top_n)
+### 2. Power (rank → demean → scale)
 
-**适用场景**：纯多头策略，选最强信号的 N 只股票等权持有。
+**适用场景**：通过排名降低信号异常值的影响，仓位基于信号的 rank 计算。
 
 **计算步骤**：
-1. 在 universe 成员中按信号值选 top-N
-2. 次日收益 = `close[t+1] / close[t] - 1`，对 top-N 等权平均
-3. 日收益率 = top-N 股票次日收益的均值
+1. **Rank**：`ranks = rankdata(signal)`（1 = 最小，N = 最大）
+2. **Demean**：`ranks_demeaned = ranks - mean(ranks)`，使 `sum(positions) ≈ 0`
+3. **Scale**：`positions = ranks_demeaned * (target_gross / sum(|ranks_demeaned|))`，使 `sum(|positions|) = target_gross`
+4. **日 PnL**：`pnl = sum(position_i * return_i)`
+5. **日收益率**：`portfolio_return = pnl / target_gross`
 
 **参数**：
-- `top_n`：持仓股票数量，默认 50
+- `target_gross`：目标总仓位（gross exposure），默认 20e6
 
-### 剔除涨/跌停股 (`exclude_limit`)
+**注意**：使用 Power 方法时，建议同时开启 `limit_filter_pos=True`，以确保 ranking 只在可交易的股票上进行（详见下文）。
 
-所有收益计算 / IC 计算函数均支持 `exclude_limit` 参数（默认 `False`）。
+### 剔除涨/跌停股 (`exclude_limit` / `limit_filter_pos`)
+
+所有收益计算 / IC 计算函数均支持 `exclude_limit` 参数（默认 `False`）。在 `exclude_limit=True` 时，可通过 `limit_filter_pos` 选择剔除时机。
 
 - **`exclude_limit=False`**（默认）：保留原有算法，不剔除任何股票。
-- **`exclude_limit=True`**：计算 `day=x` 的次日收益时，遮盖掉在 `day=x+1` 当前 tidx 已涨停或跌停的股票（即 `close[x+1, stock, tidx]` 触及当日涨停价 `UpLimPrice` 或跌停价 `DnLimPrice`，容差 `1e-4`）。这些股票的收益率被设为 NaN，进而在 `valid_mask` 中被剔除。
+- **`exclude_limit=True, limit_filter_pos=False`**（post-position mask，默认）：
+  先在全 universe 上分配仓位（demean + scale），再把涨跌停股的 PnL 贡献清零。
+  即 `positions = signal_demeaned * (target_gross / sum(|signal_demeaned|))`，
+  然后 `pnl = sum(positions[mask_keep] * returns[mask_keep])`，
+  其中 `mask_keep` 是非涨跌停股的掩码。
+- **`exclude_limit=True, limit_filter_pos=True`**（pre-position mask）：
+  先剔除 `day=x+1` 当前 tidx 已涨停或跌停的股票，再在剩余股票上分配仓位。
+  即先 `mask_keep = valid & (~limit_mask)`，再 demean + scale，
+  然后 `pnl = sum(positions * returns)`。
+
+**为什么需要 pre-position mask？**
+
+在使用 **Power (rank-based)** 持仓方式时，仓位是基于信号的 **rank** 计算的。
+如果在 ranking 之前不剔除涨跌停股，那么涨跌停股也会参与排名，挤压其他股票的排名位置，
+导致剩余股票的相对排名失真。`limit_filter_pos=True` 的根本目的就是：
+**在 ranking 之前剔除涨跌停股**，确保 ranking 只在可交易的股票上进行。
+
+具体逻辑：
+1. 计算 `limit_mask`（`day=x+1` 当前 tidx 触及涨跌停价的股票）
+2. `base_valid = (membership == 1) & np.isfinite(signal) & np.isfinite(returns)`
+3. 如果 `limit_filter_pos=True`：`base_valid = base_valid & (~limit_mask)`
+4. 在 `base_valid` 上 ranking（Power 方法）或 demean+scale（signal_weighted 方法）
+5. 计算仓位和 PnL
+
+涨跌停股定义为：`close[x+1, stock, tidx]` 触及当日涨停价 `UpLimPrice` 或跌停价 `DnLimPrice`，容差 `1e-4`。这些股票在次日无法交易，应剔除。
 
 涨跌停价数据来源：`/dfs/dataset/230-1724661625521/data/dataprod/Limits/UpLimPrice.N,5860f` 和 `DnLimPrice.N,5860f`，通过 `data_loader.load_limit_prices(data_root)` 加载，返回 `(up_lim, dn_lim)` 元组。
 
@@ -324,8 +384,8 @@ print(f"累计收益: {cum.iloc[-1]:.4f}")
 |------|------|--------|
 | `--signal-dir` | 信号数据根目录（必填） | — |
 | `--universe` | Universe 名称 | `ZZ500` |
-| `--position-method` | 持仓方式：`signal_weighted` 或 `top_n` | `signal_weighted` |
-| `--top-n` | Top-N 股票数（`top_n` 方式用） | `50` |
+| `--position-method` | 持仓方式：`signal_weighted` 或 `power` | `signal_weighted` |
+| `--target-gross` | 目标总仓位（`signal_weighted` / `power` 方式用） | `20e6` |
 | `--target-gross` | 目标总仓位（`signal_weighted` 方式用） | `20e6` |
 | `--adjust` | 复权方式：`raw`/`forward`/`backward` | `forward` |
 | `--intvs` | 逗号分隔的 intv 标签（如 `i00,i36`），留空表示全部 | — |
@@ -341,12 +401,11 @@ python generate_report.py \
     --position-method signal_weighted \
     --target-gross 20e6
 
-# Top-N 等权多头，HS300 universe，不复权
+# Power (rank → demean → scale)，HS300 universe，不复权
 python generate_report.py \
     --signal-dir ./example_signal \
     --universe HS300 \
-    --position-method top_n \
-    --top-n 30 \
+    --position-method power \
     --adjust raw
 
 # 多 intv 合并

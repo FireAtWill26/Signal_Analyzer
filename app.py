@@ -42,6 +42,7 @@ from analyzer import (
     compute_portfolio_returns_all_intv,
     compute_portfolio_pnl_by_subuniverse,
     compute_portfolio_position_share_by_subuniverse,
+    compute_top_stocks_by_month,
     compute_signal_statistics_all_intv,
     compute_daily_ic_all_intv,
     compute_monthly_ic_all_intv,
@@ -106,6 +107,7 @@ def cached_compute_returns(
     delay,
     return_source,
     exclude_limit,
+    limit_filter_pos,
     data_root,
 ):
     """Cached wrapper for compute_portfolio_returns. intv=-1 means all-intv average."""
@@ -118,6 +120,7 @@ def cached_compute_returns(
             delay=delay,
             return_source=return_source,
             exclude_limit=exclude_limit,
+            limit_filter_pos=limit_filter_pos,
         )
     return compute_portfolio_returns(
         by_intv, universe_key, data_root,
@@ -127,6 +130,7 @@ def cached_compute_returns(
         delay=delay,
         return_source=return_source,
         exclude_limit=exclude_limit,
+        limit_filter_pos=limit_filter_pos,
     )
 
 
@@ -139,6 +143,7 @@ def cached_compute_pnl_by_subuniverse(
     delay,
     return_source,
     exclude_limit,
+    limit_filter_pos,
     data_root,
 ):
     """Cached wrapper for compute_portfolio_pnl_by_subuniverse."""
@@ -152,6 +157,7 @@ def cached_compute_pnl_by_subuniverse(
         delay=delay,
         return_source=return_source,
         exclude_limit=exclude_limit,
+        limit_filter_pos=limit_filter_pos,
     )
 
 
@@ -164,6 +170,7 @@ def cached_compute_position_share_by_subuniverse(
     delay,
     return_source,
     exclude_limit,
+    limit_filter_pos,
     data_root,
 ):
     """Cached wrapper for compute_portfolio_position_share_by_subuniverse."""
@@ -177,6 +184,36 @@ def cached_compute_position_share_by_subuniverse(
         delay=delay,
         return_source=return_source,
         exclude_limit=exclude_limit,
+        limit_filter_pos=limit_filter_pos,
+    )
+
+
+@st.cache_data(show_spinner="计算每月贡献前 N 的股票...")
+def cached_compute_top_stocks_by_month(
+    signal_files_by_intv_tuple,
+    subuniverse_keys,
+    position_method,
+    target_gross,
+    delay,
+    return_source,
+    exclude_limit,
+    limit_filter_pos,
+    top_n,
+    data_root,
+):
+    """Cached wrapper for compute_top_stocks_by_month."""
+    by_intv = {k: list(v) for k, v in signal_files_by_intv_tuple}
+    return compute_top_stocks_by_month(
+        by_intv,
+        subuniverse_keys=subuniverse_keys,
+        data_root=data_root,
+        position_method=position_method,
+        target_gross=target_gross,
+        delay=delay,
+        return_source=return_source,
+        exclude_limit=exclude_limit,
+        limit_filter_pos=limit_filter_pos,
+        top_n=top_n,
     )
 
 
@@ -267,55 +304,27 @@ def _factor_label(signal_root):
     return name if name else signal_root
 
 
-_FLOATING_SELECTOR_CSS = """
-<style>
-/* Floating factor selector: target the container by its key-derived class. */
-.st-key-floating-factor-selector {
-    position: fixed !important;
-    top: 12px !important;
-    left: 50% !important;
-    transform: translateX(-50%) !important;
-    z-index: 9999 !important;
-    background: rgba(255, 255, 255, 0.96) !important;
-    border: 1px solid #e0e0e0 !important;
-    border-radius: 10px !important;
-    padding: 6px 18px !important;
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12) !important;
-    backdrop-filter: blur(4px) !important;
-    max-width: 90vw !important;
-}
-.st-key-floating-factor-selector [data-testid="stRadio"] {
-    margin: 0 !important;
-}
-</style>
-"""
+def _render_factor_selector_sidebar(available_factors, factor_labels):
+    """Render factor selector in the sidebar at the top.
 
-
-def _render_floating_factor_selector(available_factors, factor_labels):
-    """Render a floating, always-visible factor selector at the top of the page.
-
-    Uses native ``st.radio`` so clicks trigger Streamlit reruns reliably.
-    CSS ``position: fixed`` makes the bar float at the top center of the page.
+    The sidebar is always visible on desktop browsers, so the user can
+    switch factors from any scroll position.
     """
-    st.markdown(_FLOATING_SELECTOR_CSS, unsafe_allow_html=True)
-
-    with st.container(key="floating_factor_selector"):
+    with st.sidebar:
+        st.markdown("---")
+        st.markdown("#### 🔄 当前展示的因子")
         st.radio(
             "选择展示的因子",
             available_factors,
             format_func=lambda x: factor_labels.get(x, x),
-            horizontal=True,
             key='active_factor',
         )
-
-    # Spacer so content below isn't hidden behind the floating bar
-    st.markdown('<div style="height: 60px;"></div>', unsafe_allow_html=True)
 
 
 # ── UI ────────────────────────────────────────────────────────────────────────
 
 # Universes compared in the multi-universe chart / table
-COMPARISON_UNIVERSES = ['whole', 'A500', 'HS300', 'ZZ500', 'ZZ1000', 'ZZ2000', 'ChiNext', 'STAR', 'Residual']
+COMPARISON_UNIVERSES = ['whole', 'A500', 'HS300', 'ZZ500', 'ZZ1000', 'ZZ2000', 'SH', 'SZ', 'ChiNext', 'STAR', 'Residual']
 
 UNI_COLORS = {
     'whole': 'royalblue',
@@ -324,6 +333,8 @@ UNI_COLORS = {
     'ZZ500': 'purple',
     'ZZ1000': 'teal',
     'ZZ2000': 'orange',
+    'SH': 'pink',
+    'SZ': 'cyan',
     'ChiNext': 'red',
     'STAR': 'brown',
     'Residual': 'gray',
@@ -340,6 +351,7 @@ def _compute_factor_results(
     selected_delay,
     selected_return_source,
     exclude_limit,
+    limit_filter_pos,
 ):
     """Compute all per-factor results (returns, IC, stats) for one signal root.
 
@@ -370,6 +382,7 @@ def _compute_factor_results(
             selected_delay,
             selected_return_source,
             exclude_limit,
+            limit_filter_pos,
             data_root,
         )
         if uni_daily.empty:
@@ -586,6 +599,23 @@ def main():
              "或跌停的股票（价格触及当日涨停价/跌停价）。",
     )
 
+    # When exclude_limit is on, choose *when* to apply the limit filter:
+    #   - False (default): positions are computed first, then limit-hit stocks'
+    #     PnL contributions are zeroed (post-position mask).
+    #   - True: limit-hit stocks are excluded *before* position sizing (i.e.
+    #     they get zero position). Equivalent to filtering the tradeable
+    #     universe first.
+    limit_filter_pos = False
+    if exclude_limit:
+        limit_filter_pos = st.sidebar.checkbox(
+            "剔除涨跌停提前到分配仓位前",
+            value=False,
+            help="勾选后，先剔除 day=x+1 当前 tidx 已涨停/跌停的股票，"
+                 "再在剩余股票上分配仓位（pre-position mask）。"
+                 "未勾选时，先在全 universe 上分配仓位，再把涨跌停股的 PnL 贡献清零"
+                 "（post-position mask）。",
+        )
+
     # Date range display
     min_date, max_date = get_date_range(signal_root)
     if min_date and max_date:
@@ -601,6 +631,7 @@ def main():
         signal_root_a, signal_root_b, enable_second_factor,
         selected_method, target_gross, selected_intv,
         selected_delay, selected_return_source, exclude_limit,
+        limit_filter_pos,
     )
 
     # Only compute when the button is explicitly clicked, or when parameters
@@ -623,6 +654,7 @@ def main():
                     froot, universe_options, data_root,
                     selected_method, target_gross, selected_intv,
                     selected_delay, selected_return_source, exclude_limit,
+                    limit_filter_pos,
                 )
         st.session_state['factor_results'] = factor_results
         st.session_state['factor_cache_key'] = cache_key
@@ -647,15 +679,15 @@ def main():
         return
 
     # Toggle: which factor to display. When two factors are available, render
-    # the selector as a floating bar (fixed position) so the user can switch
-    # from anywhere on the page.
+    # the selector in the sidebar (always visible on desktop) and inline at
+    # the top of the main content area so the user can switch from any position.
     if len(available_factors) > 1:
         # Build the label mapping: A -> folder name of signal_root_a, etc.
         factor_labels = {
             'A': factor_a_label,
             'B': factor_b_label,
         }
-        _render_floating_factor_selector(available_factors, factor_labels)
+        _render_factor_selector_sidebar(available_factors, factor_labels)
         active_factor = st.session_state.get('active_factor', available_factors[0])
     else:
         active_factor = available_factors[0]
@@ -704,8 +736,22 @@ def main():
     intv_label = "全intv平均" if use_all_intv else f"intv={selected_intv}"
     chart_title = f"累计收益 — {active_label} | {method_label} | {intv_label}"
 
+    # Available universes with non-empty cumulative returns.
+    cum_uni_options = [
+        uni_key for uni_key in COMPARISON_UNIVERSES
+        if uni_key in uni_cum_returns and not uni_cum_returns[uni_key].empty
+    ]
+    # Default: all available sub-universes selected.
+    cum_selected = st.multiselect(
+        "选择要显示的 universe 曲线",
+        cum_uni_options,
+        default=cum_uni_options,
+        format_func=lambda k: universe_options.get(k, k),
+        key='cum_uni_selector',
+    )
+
     fig_cum = go.Figure()
-    for uni_key in COMPARISON_UNIVERSES:
+    for uni_key in cum_selected:
         if uni_key not in uni_daily_returns:
             continue
         uni_daily = uni_daily_returns[uni_key]
@@ -718,8 +764,10 @@ def main():
             mode='lines',
             name=f"{universe_options[uni_key]}",
             line=dict(color=UNI_COLORS.get(uni_key, 'black'), width=2),
+            visible=True,
         ))
-    if not benchmark_cum.empty:
+    # Include benchmark only if at least one universe is shown.
+    if cum_selected and not benchmark_cum.empty:
         fig_cum.add_trace(go.Scatter(
             x=benchmark_daily['date'].apply(_to_datetime),
             y=benchmark_cum * 100,
@@ -841,6 +889,7 @@ def main():
             selected_delay,
             selected_return_source,
             exclude_limit,
+            limit_filter_pos,
             data_root,
         )
 
@@ -904,6 +953,7 @@ def main():
             selected_delay,
             selected_return_source,
             exclude_limit,
+            limit_filter_pos,
             data_root,
         )
 
@@ -937,6 +987,37 @@ def main():
     else:
         st.warning("无法生成每月持仓占比表")
 
+    # ── monthly top-N contributing stocks table ───────────────────────────────
+    st.subheader("📊 每月贡献前 5 的股票")
+    st.markdown(
+        "对每个交易日，先按 whole universe 计算仓位，再计算每只股票的当日 PnL 贡献 "
+        "(`position_i * return_i`)。按月累计后，取每月贡献前 5 的股票，"
+        "并列出它们所属的 sub-universe。"
+    )
+
+    top_stocks_table = cached_compute_top_stocks_by_month(
+        by_intv_tuple,
+        tuple(share_uni_keys),
+        selected_method,
+        target_gross,
+        selected_delay,
+        selected_return_source,
+        exclude_limit,
+        limit_filter_pos,
+        5,
+        data_root,
+    )
+
+    if top_stocks_table is not None and not top_stocks_table.empty:
+        styled_top = top_stocks_table.style.format({
+            'pnl_contribution': '{:.2f}',
+            'rank': '{:.0f}',
+            'position_rank': '{:.0f}',
+        })
+        st.dataframe(styled_top, use_container_width=True)
+    else:
+        st.warning("无法生成每月贡献前 5 的股票表")
+
     # ── monthly IC table ──────────────────────────────────────────────────────
     st.subheader("🎯 各月 IC 对比")
     st.markdown("各月每日因子信号与隔日收益 IC 的月平均值")
@@ -953,8 +1034,21 @@ def main():
     st.subheader("🎯 Daily IC (rank)")
     st.markdown("各 universe 的每日 rank IC")
 
+    # Available universes for IC chart.
+    ic_uni_options = [
+        uni_key for uni_key in COMPARISON_UNIVERSES
+        if uni_key in daily_ic_by_uni and not daily_ic_by_uni[uni_key].empty
+    ]
+    ic_selected = st.multiselect(
+        "选择要显示的 universe 曲线",
+        ic_uni_options,
+        default=ic_uni_options,
+        format_func=lambda k: universe_options.get(k, k),
+        key='ic_uni_selector',
+    )
+
     fig_ic = go.Figure()
-    for uni_key in COMPARISON_UNIVERSES:
+    for uni_key in ic_selected:
         if uni_key not in daily_ic_by_uni:
             continue
         uni_daily_ic = daily_ic_by_uni[uni_key]

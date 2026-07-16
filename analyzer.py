@@ -582,6 +582,7 @@ def compute_signal_weighted_returns(
     delay=1,
     return_source='raw',
     exclude_limit=False,
+    limit_filter_pos=False,
 ):
     """Compute daily returns of signal-weighted long-short portfolio.
 
@@ -602,6 +603,10 @@ def compute_signal_weighted_returns(
         return_source: 'raw' (close-based) or 'dsrt' (pre-computed DSRT). Default 'raw'.
         exclude_limit: if True, mask out stocks that hit limit-up/down at the
             trading tidx on day_idx+1. Default False.
+        limit_filter_pos: if True, exclude limit-hit stocks *before* position
+            sizing (i.e. they get zero position). When False (default) and
+            exclude_limit=True, positions are computed first and limit-hit
+            stocks are then masked out of the PnL. Default False.
 
     Returns:
         pd.DataFrame with columns ['date', 'portfolio_return', 'n_stocks', 'gross'].
@@ -614,9 +619,10 @@ def compute_signal_weighted_returns(
     returns_data, adj_factor = _load_returns(data_root, return_source)
 
     # Load limit prices and close intervals for limit filtering
+    need_limit = exclude_limit or limit_filter_pos
     close_for_limit, up_lim, dn_lim = _load_limit_filter(
         data_root, return_source, returns_data
-    ) if exclude_limit else (None, None, None)
+    ) if need_limit else (None, None, None)
 
     # Select signal files using fallback logic
     best_intv, signal_files = _select_signal_files_by_intv(
@@ -659,21 +665,26 @@ def compute_signal_weighted_returns(
         # Get precomputed returns for day_idx + 1
         returns = returns_matrix[day_idx + 1]
 
-        # Exclude limit-hit stocks at trading tidx on day_idx+1
-        if exclude_limit:
+        # Compute limit-hit mask once if either option is on.
+        if need_limit:
             limit_mask = _limit_hit_mask(
                 close_for_limit, up_lim, dn_lim, day_idx + 1, tidx
             )
-            returns = np.where(limit_mask, np.nan, returns)
 
         # Apply universe mask
         membership = uni_mask[day_idx]
-        valid_mask = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
-        if valid_mask.sum() < 10:
+        # Valid = universe member + finite signal + finite return (raw).
+        # If limit_filter_pos is on, exclude limit-hit stocks from the set
+        # used for position sizing.
+        base_valid = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
+        if limit_filter_pos:
+            base_valid = base_valid & (~limit_mask)
+
+        if base_valid.sum() < 10:
             continue
 
-        signal_valid = avg_signal[valid_mask]
-        returns_valid = returns[valid_mask]
+        signal_valid = avg_signal[base_valid]
+        returns_valid = returns[base_valid]
 
         # Step 1: Demean so positions sum to 0
         signal_demeaned = signal_valid - np.mean(signal_valid)
@@ -684,14 +695,24 @@ def compute_signal_weighted_returns(
             continue
         positions = signal_demeaned * (target_gross / abs_sum)
 
-        # Daily PnL = sum(position * return); return = PnL / target_gross
-        pnl = float(np.sum(positions * returns_valid))
+        # Step 3: If exclude_limit (post-position mask), zero out limit-hit
+        # stocks' PnL contributions by masking their returns.
+        if exclude_limit and not limit_filter_pos:
+            lim_in_valid = limit_mask[base_valid]
+            keep = ~lim_in_valid
+            positions_for_pnl = positions[keep]
+            returns_for_pnl = returns_valid[keep]
+            pnl = float(np.sum(positions_for_pnl * returns_for_pnl))
+        else:
+            # Daily PnL = sum(position * return); return = PnL / target_gross
+            pnl = float(np.sum(positions * returns_valid))
+
         portfolio_return = pnl / target_gross
 
         daily_returns.append({
             'date': date_int,
             'portfolio_return': portfolio_return,
-            'n_stocks': int(valid_mask.sum()),
+            'n_stocks': int(base_valid.sum()),
             'gross': target_gross,
         })
 
@@ -709,6 +730,7 @@ def compute_power_returns(
     delay=1,
     return_source='raw',
     exclude_limit=False,
+    limit_filter_pos=False,
 ):
     """Compute daily returns using rank-based position sizing.
 
@@ -730,6 +752,8 @@ def compute_power_returns(
         return_source: 'raw' (close-based) or 'dsrt' (pre-computed DSRT). Default 'raw'.
         exclude_limit: if True, mask out stocks that hit limit-up/down at the
             trading tidx on day_idx+1. Default False.
+        limit_filter_pos: if True, exclude limit-hit stocks *before* position
+            sizing (i.e. they get zero position). Default False.
 
     Returns:
         pd.DataFrame with columns ['date', 'portfolio_return', 'n_stocks', 'gross'].
@@ -742,9 +766,10 @@ def compute_power_returns(
     returns_data, adj_factor = _load_returns(data_root, return_source)
 
     # Load limit prices and close intervals for limit filtering
+    need_limit = exclude_limit or limit_filter_pos
     close_for_limit, up_lim, dn_lim = _load_limit_filter(
         data_root, return_source, returns_data
-    ) if exclude_limit else (None, None, None)
+    ) if need_limit else (None, None, None)
 
     # Select signal files using fallback logic
     best_intv, signal_files = _select_signal_files_by_intv(
@@ -787,20 +812,26 @@ def compute_power_returns(
         # Get precomputed returns for day_idx + 1
         returns = returns_matrix[day_idx + 1]
 
-        # Exclude limit-hit stocks at trading tidx on day_idx+1
-        if exclude_limit:
+        # Compute limit-hit mask once if either option is on.
+        if need_limit:
             limit_mask = _limit_hit_mask(
                 close_for_limit, up_lim, dn_lim, day_idx + 1, tidx
             )
-            returns = np.where(limit_mask, np.nan, returns)
 
+        # Apply universe mask
         membership = uni_mask[day_idx]
-        valid_mask = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
-        if valid_mask.sum() < 10:
+        # Valid = universe member + finite signal + finite return (raw).
+        # If limit_filter_pos is on, exclude limit-hit stocks from the set
+        # used for position sizing.
+        base_valid = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
+        if limit_filter_pos:
+            base_valid = base_valid & (~limit_mask)
+
+        if base_valid.sum() < 10:
             continue
 
-        signal_valid = avg_signal[valid_mask]
-        returns_valid = returns[valid_mask]
+        signal_valid = avg_signal[base_valid]
+        returns_valid = returns[base_valid]
 
         # Step 1: Rank signal (1=smallest, N=largest)
         ranks = sp_stats.rankdata(signal_valid)  # float64
@@ -814,14 +845,24 @@ def compute_power_returns(
             continue
         positions = ranks_demeaned * (target_gross / abs_sum)
 
-        # Daily PnL = sum(position * return); return = PnL / target_gross
-        pnl = float(np.sum(positions * returns_valid))
+        # Step 4: If exclude_limit (post-position mask), zero out limit-hit
+        # stocks' contributions by setting their returns to NaN.
+        if exclude_limit and not limit_filter_pos:
+            lim_in_valid = limit_mask[base_valid]
+            keep = ~lim_in_valid
+            positions_for_pnl = positions[keep]
+            returns_valid = returns_valid[keep]
+            pnl = float(np.sum(positions_for_pnl * returns_valid))
+        else:
+            # Daily PnL = sum(position * return); return = PnL / target_gross
+            pnl = float(np.sum(positions * returns_valid))
+
         portfolio_return = pnl / target_gross
 
         daily_returns.append({
             'date': date_int,
             'portfolio_return': portfolio_return,
-            'n_stocks': int(valid_mask.sum()),
+            'n_stocks': int(base_valid.sum()),
             'gross': target_gross,
         })
 
@@ -922,6 +963,7 @@ def compute_portfolio_returns(
     delay=1,
     return_source='raw',
     exclude_limit=False,
+    limit_filter_pos=False,
 ):
     """Dispatch to the appropriate portfolio return computation.
 
@@ -937,6 +979,8 @@ def compute_portfolio_returns(
         return_source: 'raw' (close-based) or 'dsrt' (pre-computed DSRT). Default 'raw'.
         exclude_limit: if True, mask out stocks that hit limit-up/down at the
             trading tidx on day_idx+1. Default False.
+        limit_filter_pos: if True, exclude limit-hit stocks *before* position
+            sizing (i.e. they get zero position). Default False.
 
     Returns:
         pd.DataFrame with daily portfolio returns.
@@ -946,12 +990,14 @@ def compute_portfolio_returns(
             signal_files_by_intv, universe_key, data_root,
             target_gross=target_gross, intv=intv, delay=delay,
             return_source=return_source, exclude_limit=exclude_limit,
+            limit_filter_pos=limit_filter_pos,
         )
     elif position_method == 'power':
         return compute_power_returns(
             signal_files_by_intv, universe_key, data_root,
             target_gross=target_gross, intv=intv, delay=delay,
             return_source=return_source, exclude_limit=exclude_limit,
+            limit_filter_pos=limit_filter_pos,
         )
     else:
         raise ValueError(f"Unknown position_method: {position_method}")
@@ -968,6 +1014,7 @@ def compute_portfolio_returns_all_intv(
     delay=1,
     return_source='raw',
     exclude_limit=False,
+    limit_filter_pos=False,
 ):
     """Compute daily returns averaged across all available intv values.
 
@@ -985,11 +1032,14 @@ def compute_portfolio_returns_all_intv(
         return_source: 'raw' (close-based) or 'dsrt' (pre-computed DSRT). Default 'raw'.
         exclude_limit: if True, mask out stocks that hit limit-up/down at the
             trading tidx on day_idx+1. Default False.
+        limit_filter_pos: if True, exclude limit-hit stocks *before* position
+            sizing (i.e. they get zero position). Default False.
 
     Returns:
         pd.DataFrame with columns ['date', 'portfolio_return', 'n_stocks', 'gross'].
     """
-    available_intvs = sorted(signal_files_by_intv.keys())
+    # available_intvs = sorted(signal_files_by_intv.keys())
+    available_intvs = list(range(48))
     if not available_intvs:
         return pd.DataFrame()
 
@@ -1004,9 +1054,10 @@ def compute_portfolio_returns_all_intv(
     n_days = len(dates_arr)
 
     # Load limit prices and close intervals for limit filtering
+    need_limit = exclude_limit or limit_filter_pos
     close_for_limit, up_lim, dn_lim = _load_limit_filter(
         data_root, return_source, all_returns
-    ) if exclude_limit else (None, None, None)
+    ) if need_limit else (None, None, None)
 
     # Batch-load signal matrices for all intvs in parallel (cached at module
     # level, so subsequent universes reuse the same loaded data).
@@ -1049,20 +1100,25 @@ def compute_portfolio_returns_all_intv(
             avg_signal = signal_matrix[day_idx]
             returns = all_returns[day_idx + 1, :, tidx]
 
-            if exclude_limit:
+            # Compute limit-hit mask once if either option is on.
+            if need_limit:
                 limit_mask = _limit_hit_mask(
                     close_for_limit, up_lim, dn_lim, day_idx + 1, tidx
                 )
-                returns = np.where(limit_mask, np.nan, returns)
 
             membership = uni_mask[day_idx]
-            valid_mask = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
-            n_valid = int(valid_mask.sum())
+            # If limit_filter_pos is on, exclude limit-hit stocks from the set
+            # used for position sizing.
+            base_valid = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
+            if limit_filter_pos:
+                base_valid = base_valid & (~limit_mask)
+
+            n_valid = int(base_valid.sum())
             if n_valid < 10:
                 continue
 
-            signal_valid = avg_signal[valid_mask]
-            returns_valid = returns[valid_mask]
+            signal_valid = avg_signal[base_valid]
+            returns_valid = returns[base_valid]
 
             if position_method == 'signal_weighted':
                 signal_demeaned = signal_valid - np.mean(signal_valid)
@@ -1078,7 +1134,17 @@ def compute_portfolio_returns_all_intv(
                     continue
                 positions = ranks_demeaned * (target_gross / abs_sum)
 
-            pnl = float(np.sum(positions * returns_valid))
+            # If exclude_limit (post-position mask) and not already filtered
+            # pre-position, zero out limit-hit stocks' contributions.
+            if exclude_limit and not limit_filter_pos:
+                lim_in_valid = limit_mask[base_valid]
+                keep = ~lim_in_valid
+                positions_for_pnl = positions[keep]
+                returns_valid = returns_valid[keep]
+                pnl = float(np.sum(positions_for_pnl * returns_valid))
+            else:
+                pnl = float(np.sum(positions * returns_valid))
+
             portfolio_return = pnl / target_gross
 
             daily_returns.append({
@@ -1116,6 +1182,7 @@ def compute_portfolio_pnl_by_subuniverse(
     delay=1,
     return_source='raw',
     exclude_limit=False,
+    limit_filter_pos=False,
 ):
     """Compute daily PnL contribution per sub-universe.
 
@@ -1138,6 +1205,8 @@ def compute_portfolio_pnl_by_subuniverse(
         return_source: 'raw' (close-based) or 'dsrt' (pre-computed DSRT).
         exclude_limit: if True, mask out stocks that hit limit-up/down at the
             trading tidx on day_idx+1. Default False.
+        limit_filter_pos: if True, exclude limit-hit stocks *before* position
+            sizing (i.e. they get zero position). Default False.
 
     Returns:
         pd.DataFrame with one row per (date, subuniverse) pair and columns:
@@ -1164,9 +1233,10 @@ def compute_portfolio_pnl_by_subuniverse(
     n_days = len(dates_arr)
 
     # Load limit prices and close intervals for limit filtering
+    need_limit = exclude_limit or limit_filter_pos
     close_for_limit, up_lim, dn_lim = _load_limit_filter(
         data_root, return_source, all_returns
-    ) if exclude_limit else (None, None, None)
+    ) if need_limit else (None, None, None)
 
     # Batch-load signal matrices for all intvs in parallel (cached at module
     # level, so subsequent universes reuse the same loaded data).
@@ -1206,20 +1276,25 @@ def compute_portfolio_pnl_by_subuniverse(
             avg_signal = signal_matrix[day_idx]
             returns = all_returns[day_idx + 1, :, tidx]
 
-            if exclude_limit:
+            # Compute limit-hit mask once if either option is on.
+            if need_limit:
                 limit_mask = _limit_hit_mask(
                     close_for_limit, up_lim, dn_lim, day_idx + 1, tidx
                 )
-                returns = np.where(limit_mask, np.nan, returns)
 
             membership = whole_mask[day_idx]
-            valid_mask = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
-            n_valid = int(valid_mask.sum())
+            base_valid = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
+            # If limit_filter_pos is on, exclude limit-hit stocks from the
+            # set used for position sizing.
+            if limit_filter_pos:
+                base_valid = base_valid & (~limit_mask)
+
+            n_valid = int(base_valid.sum())
             if n_valid < 10:
                 continue
 
-            signal_valid = avg_signal[valid_mask]
-            returns_valid = returns[valid_mask]
+            signal_valid = avg_signal[base_valid]
+            returns_valid = returns[base_valid]
 
             if position_method == 'signal_weighted':
                 signal_demeaned = signal_valid - np.mean(signal_valid)
@@ -1236,11 +1311,11 @@ def compute_portfolio_pnl_by_subuniverse(
                 positions_valid = ranks_demeaned * (target_gross / abs_sum)
 
             # Decompose PnL by sub-universe membership. ``positions_valid`` is
-            # indexed by ``valid_mask``; we compress each sub-universe mask
+            # indexed by ``base_valid``; we compress each sub-universe mask
             # the same way so the elementwise product lines up.
             for sub_key in subuniverse_keys:
                 sub_membership = sub_masks[sub_key][day_idx]
-                sub_valid = (sub_membership == 1) & valid_mask
+                sub_valid = (sub_membership == 1) & base_valid
                 if not sub_valid.any():
                     rows.append({
                         'date': date_int,
@@ -1248,8 +1323,18 @@ def compute_portfolio_pnl_by_subuniverse(
                         'pnl_contribution': 0.0,
                     })
                     continue
-                positions_sub = positions_valid[sub_valid[valid_mask]]
-                returns_sub = returns_valid[sub_valid[valid_mask]]
+                sub_idx_in_valid = sub_valid[base_valid]
+                positions_sub = positions_valid[sub_idx_in_valid]
+                returns_sub = returns_valid[sub_idx_in_valid]
+
+                # If exclude_limit (post-position mask), zero out limit-hit
+                # stocks' PnL contributions.
+                if exclude_limit and not limit_filter_pos:
+                    lim_in_sub = limit_mask[base_valid][sub_idx_in_valid]
+                    keep = ~lim_in_sub
+                    positions_sub = positions_sub[keep]
+                    returns_sub = returns_sub[keep]
+
                 partial_pnl = float(np.sum(positions_sub * returns_sub))
                 rows.append({
                     'date': date_int,
@@ -1284,6 +1369,7 @@ def compute_portfolio_position_share_by_subuniverse(
     delay=1,
     return_source='raw',
     exclude_limit=False,
+    limit_filter_pos=False,
 ):
     """Compute daily position share per sub-universe.
 
@@ -1307,6 +1393,8 @@ def compute_portfolio_position_share_by_subuniverse(
         return_source: 'raw' (close-based) or 'dsrt' (pre-computed DSRT).
         exclude_limit: if True, mask out stocks that hit limit-up/down at the
             trading tidx on day_idx+1. Default False.
+        limit_filter_pos: if True, exclude limit-hit stocks *before* position
+            sizing (i.e. they get zero position). Default False.
 
     Returns:
         pd.DataFrame with one row per (date, subuniverse) pair and columns:
@@ -1329,9 +1417,10 @@ def compute_portfolio_position_share_by_subuniverse(
     all_returns = _precompute_all_returns(data_root, return_source)
     n_days = len(dates_arr)
 
+    need_limit = exclude_limit or limit_filter_pos
     close_for_limit, up_lim, dn_lim = _load_limit_filter(
         data_root, return_source, all_returns
-    ) if exclude_limit else (None, None, None)
+    ) if need_limit else (None, None, None)
 
     def _load_one_intv(intv):
         best_intv, signal_files = _select_signal_files_by_intv(
@@ -1369,20 +1458,25 @@ def compute_portfolio_position_share_by_subuniverse(
             avg_signal = signal_matrix[day_idx]
             returns = all_returns[day_idx + 1, :, tidx]
 
-            if exclude_limit:
+            # Compute limit-hit mask once if either option is on.
+            if need_limit:
                 limit_mask = _limit_hit_mask(
                     close_for_limit, up_lim, dn_lim, day_idx + 1, tidx
                 )
-                returns = np.where(limit_mask, np.nan, returns)
 
             membership = whole_mask[day_idx]
-            valid_mask = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
-            n_valid = int(valid_mask.sum())
+            base_valid = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
+            # If limit_filter_pos is on, exclude limit-hit stocks from the
+            # set used for position sizing.
+            if limit_filter_pos:
+                base_valid = base_valid & (~limit_mask)
+
+            n_valid = int(base_valid.sum())
             if n_valid < 10:
                 continue
 
-            signal_valid = avg_signal[valid_mask]
-            returns_valid = returns[valid_mask]
+            signal_valid = avg_signal[base_valid]
+            returns_valid = returns[base_valid]
 
             if position_method == 'signal_weighted':
                 signal_demeaned = signal_valid - np.mean(signal_valid)
@@ -1399,12 +1493,12 @@ def compute_portfolio_position_share_by_subuniverse(
                 positions_valid = ranks_demeaned * (target_gross / abs_sum)
 
             # Position share for sub-universe S = sum(|positions[mask_S]|) /
-            # target_gross. ``positions_valid`` is indexed by ``valid_mask``;
+            # target_gross. ``positions_valid`` is indexed by ``base_valid``;
             # we compress each sub-universe mask the same way so the
             # elementwise product lines up.
             for sub_key in subuniverse_keys:
                 sub_membership = sub_masks[sub_key][day_idx]
-                sub_valid = (sub_membership == 1) & valid_mask
+                sub_valid = (sub_membership == 1) & base_valid
                 if not sub_valid.any():
                     rows.append({
                         'date': date_int,
@@ -1412,7 +1506,15 @@ def compute_portfolio_position_share_by_subuniverse(
                         'position_share': 0.0,
                     })
                     continue
-                positions_sub = positions_valid[sub_valid[valid_mask]]
+                sub_idx_in_valid = sub_valid[base_valid]
+                positions_sub = positions_valid[sub_idx_in_valid]
+
+                # If exclude_limit (post-position mask), zero out limit-hit
+                # stocks' position contributions.
+                if exclude_limit and not limit_filter_pos:
+                    lim_in_sub = limit_mask[base_valid][sub_idx_in_valid]
+                    positions_sub = positions_sub[~lim_in_sub]
+
                 gross_sub = float(np.sum(np.abs(positions_sub)))
                 rows.append({
                     'date': date_int,
@@ -1436,6 +1538,243 @@ def compute_portfolio_position_share_by_subuniverse(
     }).reset_index()
 
     return avg
+
+
+def compute_top_stocks_by_month(
+    signal_files_by_intv,
+    subuniverse_keys,
+    data_root,
+    position_method='signal_weighted',
+    target_gross=20e6,
+    delay=1,
+    return_source='raw',
+    exclude_limit=False,
+    limit_filter_pos=False,
+    top_n=5,
+):
+    """Compute top-N stocks contributing to monthly PnL.
+
+    For each day, positions are computed using the **whole universe** signal
+    (demean + scale to target_gross). Each stock's daily PnL contribution is
+    ``position_i * return_i``. Daily contributions are summed to monthly
+    contributions, then the top-N stocks per month are returned.
+
+    Args:
+        signal_files_by_intv: dict {intv_value: [(date, path), ...]}.
+        subuniverse_keys: list of sub-universe keys to look up membership.
+        data_root: root of data directory.
+        position_method: 'signal_weighted' (default) or 'power'.
+        target_gross: target gross exposure.
+        delay: number of intervals after signal to trade. Default 1.
+        return_source: 'raw' (close-based) or 'dsrt' (pre-computed DSRT).
+        exclude_limit: if True, mask out limit-hit stocks. Default False.
+        limit_filter_pos: if True, exclude limit-hit stocks before sizing. Default False.
+        top_n: number of top stocks to return per month. Default 5.
+
+    Returns:
+        pd.DataFrame with columns:
+            ['month_label', 'rank', 'stock_code', 'pnl_contribution',
+             'position_rank', 'sub_universes']
+        where ``sub_universes`` is a comma-joined list of sub-universe keys
+        the stock belongs to on that day, and ``position_rank`` is the rank of
+        the stock within the month by total absolute position (1 = largest).
+    """
+    available_intvs = sorted(signal_files_by_intv.keys())
+    if not available_intvs:
+        return pd.DataFrame()
+
+    uid_arr = np.array(load_uid(data_root))
+    dates_arr = np.array(load_dates(data_root))
+    sorted_uids, sort_idx = _build_stock_lookup(uid_arr)
+    whole_mask = load_universe_mask('whole', data_root)
+
+    sub_masks = {
+        key: load_universe_mask(key, data_root) for key in subuniverse_keys
+    }
+
+    all_returns = _precompute_all_returns(data_root, return_source)
+    n_days = len(dates_arr)
+
+    need_limit = exclude_limit or limit_filter_pos
+    close_for_limit, up_lim, dn_lim = _load_limit_filter(
+        data_root, return_source, all_returns
+    ) if need_limit else (None, None, None)
+
+    def _load_one_intv(intv):
+        best_intv, signal_files = _select_signal_files_by_intv(
+            signal_files_by_intv, intv
+        )
+        if best_intv is None:
+            return None
+        return intv, _load_signal_matrix(
+            signal_files, sorted_uids, sort_idx, dates_arr
+        )
+
+    n_workers_load = min(len(available_intvs), 8)
+    with ThreadPoolExecutor(max_workers=n_workers_load) as ex:
+        load_results = list(ex.map(_load_one_intv, available_intvs))
+
+    signal_matrices = {}
+    for r in load_results:
+        if r is not None:
+            signal_matrices[r[0]] = r[1]
+
+    # Per-stock monthly PnL contribution accumulator.
+    # Keyed by (month_key, stock_idx_in_universe) -> pnl sum.
+    # We use the stock code for the final output, but accumulate by
+    # integer column index since positions are column-aligned.
+    monthly_pnl = {}  # {(month_key, col_idx): pnl_sum}
+    monthly_pos_abs = {}  # {(month_key, col_idx): sum(|position_i|)
+
+    def _compute_one(intv):
+        if intv not in signal_matrices:
+            return None
+        signal_matrix = signal_matrices[intv]
+        tidx = intv + delay
+        if tidx >= all_returns.shape[2]:
+            return None
+
+        local_pnl = {}
+        local_pos_abs = {}
+        for day_idx in range(n_days - 1):
+            if not np.isfinite(signal_matrix[day_idx]).any():
+                continue
+            date_int = int(dates_arr[day_idx])
+
+            avg_signal = signal_matrix[day_idx]
+            returns = all_returns[day_idx + 1, :, tidx]
+
+            if need_limit:
+                limit_mask = _limit_hit_mask(
+                    close_for_limit, up_lim, dn_lim, day_idx + 1, tidx
+                )
+
+            membership = whole_mask[day_idx]
+            base_valid = (membership == 1) & np.isfinite(avg_signal) & np.isfinite(returns)
+            if limit_filter_pos:
+                base_valid = base_valid & (~limit_mask)
+
+            n_valid = int(base_valid.sum())
+            if n_valid < 10:
+                continue
+
+            signal_valid = avg_signal[base_valid]
+            returns_valid = returns[base_valid]
+
+            if position_method == 'signal_weighted':
+                signal_demeaned = signal_valid - np.mean(signal_valid)
+                abs_sum = float(np.sum(np.abs(signal_demeaned)))
+                if abs_sum < 1e-8:
+                    continue
+                positions_valid = signal_demeaned * (target_gross / abs_sum)
+            else:  # power
+                ranks = sp_stats.rankdata(signal_valid)
+                ranks_demeaned = ranks - np.mean(ranks)
+                abs_sum = float(np.sum(np.abs(ranks_demeaned)))
+                if abs_sum < 1e-8:
+                    continue
+                positions_valid = ranks_demeaned * (target_gross / abs_sum)
+
+            # Per-stock PnL contribution: position_i * return_i
+            stock_pnl = positions_valid * returns_valid
+            # Per-stock absolute position (for total holding ranking)
+            stock_pos_abs = np.abs(positions_valid)
+
+            # If exclude_limit (post-position mask), zero out limit-hit stocks.
+            if exclude_limit and not limit_filter_pos:
+                lim_in_valid = limit_mask[base_valid]
+                stock_pnl = np.where(lim_in_valid, 0.0, stock_pnl)
+                stock_pos_abs = np.where(lim_in_valid, 0.0, stock_pos_abs)
+
+            # Accumulate by (month, column index in universe)
+            month = month_key(date_int)
+            col_indices = np.where(base_valid)[0]
+            for ci, pnl, pos in zip(col_indices, stock_pnl, stock_pos_abs):
+                key = (month, int(ci))
+                local_pnl[key] = local_pnl.get(key, 0.0) + float(pnl)
+                local_pos_abs[key] = local_pos_abs.get(key, 0.0) + float(pos)
+        return local_pnl, local_pos_abs
+
+    n_workers = min(len(available_intvs), 8)
+    with ThreadPoolExecutor(max_workers=n_workers) as ex:
+        results = list(ex.map(_compute_one, available_intvs))
+
+    # Merge per-intv results: average PnL across intv values.
+    intv_count = {}  # {(month, col_idx): count of intvs that contributed}
+    for r in results:
+        if not r:
+            continue
+        local_pnl, local_pos_abs = r
+        for key, pnl in local_pnl.items():
+            monthly_pnl[key] = monthly_pnl.get(key, 0.0) + pnl
+            intv_count[key] = intv_count.get(key, 0) + 1
+        for key, pos in local_pos_abs.items():
+            monthly_pos_abs[key] = monthly_pos_abs.get(key, 0.0) + pos
+
+    for key in list(monthly_pnl.keys()):
+        if intv_count.get(key, 0) > 0:
+            monthly_pnl[key] /= intv_count[key]
+            monthly_pos_abs[key] /= intv_count[key]
+
+    if not monthly_pnl:
+        return pd.DataFrame()
+
+    # Group by month, find top_n stocks per month.
+    months = sorted(set(mk for mk, _ in monthly_pnl.keys()))
+
+    # Pre-compute, for each month, the list of day indices belonging to that
+    # month. This lets us restrict the sub-universe membership lookup to days
+    # within the same month, rather than checking the entire date range.
+    month_to_day_idxs = {}
+    for day_idx in range(n_days):
+        date_int = int(dates_arr[day_idx])
+        mk = month_key(date_int)
+        month_to_day_idxs.setdefault(mk, []).append(day_idx)
+
+    rows = []
+    for mk in months:
+        # Collect all stocks contributing this month.
+        month_stocks = [
+            (ci, pnl) for (m, ci), pnl in monthly_pnl.items() if m == mk
+        ]
+        if not month_stocks:
+            continue
+        # Sort by PnL descending and take top_n.
+        month_stocks.sort(key=lambda x: x[1], reverse=True)
+        top_stocks = month_stocks[:top_n]
+
+        # Compute position rank within this month: rank by total |position|
+        # (descending, 1 = largest holding).
+        month_pos_list = [
+            (ci, monthly_pos_abs.get((mk, ci), 0.0))
+            for (m, ci) in monthly_pnl.keys() if m == mk
+        ]
+        month_pos_list.sort(key=lambda x: x[1], reverse=True)
+        pos_rank_map = {ci: rank for rank, (ci, _) in enumerate(month_pos_list, 1)}
+
+        # Day indices belonging to this month.
+        month_day_idxs = month_to_day_idxs.get(mk, [])
+
+        for rank, (col_idx, pnl) in enumerate(top_stocks, 1):
+            stock_code = str(uid_arr[col_idx])
+            # Look up sub-universe memberships within this month only:
+            # check if the stock was a member of each sub-universe on any
+            # day belonging to this month.
+            memberships = []
+            for sub_key in subuniverse_keys:
+                sub_mask = sub_masks[sub_key]
+                if sub_mask[month_day_idxs, col_idx].any():
+                    memberships.append(sub_key)
+            rows.append({
+                'month_label': month_label(mk),
+                'rank': rank,
+                'stock_code': stock_code,
+                'pnl_contribution': pnl,
+                'position_rank': pos_rank_map.get(col_idx, -1),
+                'sub_universes': ', '.join(memberships),
+            })
+
+    return pd.DataFrame(rows)
 
 
 # ── cumulative returns ────────────────────────────────────────────────────────

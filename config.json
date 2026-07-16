@@ -1,7 +1,7 @@
 {
     "data_root": "/dfs/dataset/230-1724661625521/data/dataprod",
-    "signal_root": "/dfs/data/tools/analyzer/example_signal",
-    "output_dir": "/dfs/data/tools/analyzer/output",
+    "signal_root": "example_signal",
+    "output_dir": "output",
     "universe_list": [
         {"key": "whole", "name": "Whole Universe", "path": "__universe/uid.N128C", "type": "uid"},
         {"key": "A500", "name": "A500", "path": "A500/A500.N,5860c", "type": "membership"},
@@ -18,6 +18,8 @@
         {"key": "SZSE", "name": "深证", "path": "BlockN/block4n.N,5860I", "type": "block", "block_id": 1},
         {"key": "ChiNext", "name": "创业板", "path": "BlockN/block4n.N,5860I", "type": "block", "block_id": 2},
         {"key": "STAR", "name": "科创板", "path": "BlockN/block4n.N,5860I", "type": "block", "block_id": 3},
+        {"key": "SH", "name": "上证主板", "type": "complement", "base": "SSE", "subtract": ["STAR"]},
+        {"key": "SZ", "name": "深证主板", "type": "complement", "base": "SZSE", "subtract": ["ChiNext"]},
         {"key": "Residual", "name": "Residual", "type": "complement", "base": "whole", "subtract": ["HS300", "ZZ500", "ZZ1000", "ZZ2000"]}
     ],
     "price_files": {

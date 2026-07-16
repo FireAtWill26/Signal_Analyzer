@@ -49,7 +49,7 @@ N_INTERVALS = 49     # IntervalFull interval count
 
 # ── config ────────────────────────────────────────────────────────────────────
 
-def load_config(config_path='/dfs/data/tools/analyzer/config.json'):
+def load_config(config_path='config.json'):
     """Load analyzer config."""
     with open(config_path, 'r') as f:
         return json.load(f)
@@ -73,12 +73,16 @@ def load_uid(data_root):
 
 
 def load_dates(data_root):
-    """Load trading dates as YYYYMMDD int32 array."""
+    """Load trading dates as YYYYMMDD int32 array.
+
+    Truncated to ``N_VALID_DAYS`` to match price/adj_factor arrays, since
+    the dates.NI file may contain more entries than the valid price rows.
+    """
     ck = ('dates', data_root)
     if ck not in _DATA_CACHE:
         path = os.path.join(data_root, '__universe/dates.NI')
         arr = np.memmap(path, dtype='<i4', mode='r')
-        _DATA_CACHE[ck] = np.array(arr)
+        _DATA_CACHE[ck] = np.array(arr[:N_VALID_DAYS])
     return _DATA_CACHE[ck]
 
 
