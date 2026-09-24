@@ -1428,12 +1428,12 @@ class training_test(BaseModel):
     def correlation_loss(self, pred, target, weight=None):
         # correlation_ratio = self.training_dic["correlation_ratio"]
 
-        pred_centered = pred - pred.mean(dim=0, keepdim=True)
-        target_centered = target - target.mean(dim=0, keepdim=True)
+        pred_centered = pred - pred.mean()
+        target_centered = target - target.mean()
         if weight is None:
             weight = torch.ones_like(pred)
-        corr_nume = torch.sum(pred_centered * target_centered * weight, dim=0, keepdim=True)
-        corr_denom = torch.sqrt((torch.sum((pred_centered ** 2)*weight, dim=0, keepdim=True) + 1e-7) * (torch.sum((target_centered ** 2)*weight, dim=0, keepdim=True) + 1e-7))
+        corr_nume = torch.sum(pred_centered * target_centered * weight)
+        corr_denom = torch.sqrt((torch.sum((pred_centered ** 2)*weight) + 1e-7) * (torch.sum((target_centered ** 2)*weight) + 1e-7))
 
         corr = corr_nume / corr_denom
         # return - correlation_ratio * corr + (1-correlation_ratio) * torch.nn.MSELoss()(pred, target)
